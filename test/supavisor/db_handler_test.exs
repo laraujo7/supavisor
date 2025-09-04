@@ -166,6 +166,84 @@ defmodule Supavisor.DbHandlerTest do
     end
   end
 
+  describe "handle_event/4 info tcp authentication authentication_sasl_password payload events" do
+    setup do
+      {a, b} = sockpair()
+
+      data = %{
+        auth: %{
+          user: "user",
+          require_user: false,
+          secrets: fn -> %{user: "user", password: "pass"} end
+        },
+        sock: {:gen_tcp, a},
+        nonce: "some nonce"
+      }
+
+      %{data: data, b: b}
+    end
+
+    test "handles SASL authentication and sets nonce", %{data: data, b: b} do
+      # `82` is `?R`, which identifies the payload tag as `:authentication`
+      # `0, 0, 0, 22` is the packet length
+      # `0, 0, 0, 10` is the authentication type, identified as `:authentication_sasl_password`
+      payload = "SCRAM-SHA-256" <> <<0>>
+      bin = <<82, 0, 0, 0, 22, 0, 0, 0, 10, payload::binary>>
+
+      content = {:tcp, b, bin}
+
+      assert {:keep_state, %{nonce: nonce}} =
+               Db.handle_event(:info, content, :authentication, data)
+
+      assert nonce != data.nonce
+    end
+
+    test "does not set a nonce when SASL authentication fails", %{data: data, b: b} do
+      payload = "SCRAM-SHA-256"
+      bin = <<82, 0, 0, 0, 21, 0, 0, 0, 10, payload::binary>>
+
+      content = {:tcp, b, bin}
+
+      assert {:keep_state, %{nonce: nil}} = Db.handle_event(:info, content, :authentication, data)
+    end
+  end
+
+  describe "handle_event/4 info tcp authentication authentication_server_first_message payload events" do
+    test "handles server first message" do
+      server_first = "r=nonce12345nonce67890,s=c2FsdA==,i=4096" <> <<0>>
+      pkt_len = 4 + byte_size(server_first)
+      bin = <<82, pkt_len::32, 0, 0, 0, 11, server_first::binary>>
+
+      {a, b} = sockpair()
+      content = {:tcp, b, bin}
+
+      secrets = %{
+        user: "user",
+        password: "pass",
+        client_key: :binary.copy(<<1>>, 32),
+        stored_key: :binary.copy(<<2>>, 32),
+        server_key: :binary.copy(<<3>>, 32)
+      }
+
+      data = %{
+        auth: %{
+          user: "user",
+          secrets: fn -> secrets end,
+          require_user: false,
+          nonce: "nonce12345"
+        },
+        sock: {:gen_tcp, a},
+        nonce: "nonce12345",
+        server_proof: nil
+      }
+
+      assert {:keep_state, %{server_proof: server_proof}} =
+               Db.handle_event(:info, content, :authentication, data)
+
+      assert server_proof != data.server_proof
+    end
+  end
+
   describe "handle_event/4 info tcp authentication authentication_md5_password payload events" do
     test "keeps state while sending the digested md5" do
       # `82` is `?R`, which identifies the payload tag as `:authentication`
